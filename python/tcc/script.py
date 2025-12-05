@@ -1,57 +1,23 @@
 import numpy as np
-import sys
-
-S2P_FILE    = './sweep/s21.s2p'
-
-# Listas para armazenar os dados
-frequencies = []
-magnitudes_db = []
-phases_deg = []
-
-print(f"Lendo o arquivo: {S2P_FILE}")
-
-try:
-    with open(S2P_FILE, 'r') as f:
-        for line in f:
-            # Remove espaços em branco no início/fim
-            line = line.strip()
-            
-            # Ignora linhas vazias
-            if not line:
-                continue
-            
-            # Ignora linhas de comentário (começam com '!')
-            if line.startswith('!'):
-                continue
-            
-            # Ignora a linha de cabeçalho (começa com '#' header)
-            if line.startswith('#'):
-                continue
-            
-            # Processa a linha de dados
-            try:
-                parts = line.split()
-                if len(parts) >= 3:
-                    frequencies.append(float(parts[0]))
-                    magnitudes_db.append(float(parts[1]))
-                    phases_deg.append(float(parts[2]))
-            except ValueError as e:
-                print(f"Aviso: Ignorando linha mal formatada: '{line}' ({e})")
-
-except FileNotFoundError:
-    print(f"Erro: Arquivo não encontrado em '{S2P_FILE}'")
-    sys.exit(1)
-except Exception as e:
-    print(f"Erro ao ler o arquivo: {e}")
-    sys.exit(1)
-
-if not frequencies:
-    print("Erro: Nenhum dado válido encontrado no arquivo.")
-    sys.exit(1)
+sample_rate = 20e6
+num_samples = 1e6
+f_carrier = 5e9
 
 
-freq_ghz = np.array(frequencies) / 1e9
-mag_db = np.array(magnitudes_db)
-phase_deg = np.array(phases_deg)
+def gauss_pulse(t, t_samples_shift, A0, sigma):
+    # t_samples_shift: delta time (drive - ressonator) in number of samples
 
+    # Convert number of samples to time
+    T1 = t[1]-t[0]
+    t_shift = t_samples_shift * T1
+
+    gauss = A0*np.exp(-0.5*((t-t_shift)/sigma)**2)
+    return gauss
+
+t = np.arange(-num_samples/2, num_samples/2+1) / sample_rate
+
+sig = gauss_pulse(t=t, t_samples_shift=0, A0=1, sigma=400e-9)
+carr = np.exp(1j*2*np.pi*f_carrier)
+
+send_sig = sig*carr
 

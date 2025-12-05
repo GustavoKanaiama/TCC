@@ -38,6 +38,8 @@ from datetime import datetime
 import numpy as np
 import matplotlib.pyplot as plt
 from tqdm import tqdm
+import shutil
+import math
 
 from bladerf import _bladerf     # binding oficial da bladeRF
 
@@ -50,7 +52,7 @@ TARGET_DBFS = -10 # alvo RMS (dBFS) do canal de referência
 TOL_DB = 0.1 # tolerância do servo (±dB)
 TX_STEP = 2 # passo de ajuste do ganho TX (dB, >=1)
 MAX_ITER = 10 # máx iterações do servo por frequência
-TX_GAIN_MIN = -15 # limite inferior do gain TX (bladeRF)
+TX_GAIN_MIN = 0 # limite inferior do gain TX (bladeRF)
 TX_GAIN_MAX = 60 # limite superior do gain TX (bladeRF)
 
 # ──────────────────────────────────────────────────────────────
@@ -59,19 +61,30 @@ TX_GAIN_MAX = 60 # limite superior do gain TX (bladeRF)
 Fs          = 5e6                # taxa de amostragem (3 MS/s)
 NSAMP       = 2048                  # amostras por bloco/canal (FFT_SIZE do monitor)
 NBLK        = 64                    # blocos válidos agregados por frequência
-N_THROW     = 1                 # blocos descartados logo após mudar freq
+N_THROW     = 3                 # blocos descartados logo após mudar freq
 F_TONE      = 40e4               # tom transmitido (KHz)
-GAIN_TX0    = 25                 # ganho inicial de TX
-GAIN_RX0    = 30                 # ganho RX0
-GAIN_RX1    = 30                 # ganho RX1
-FSTART      = 2.5e9              # start do sweep
-FSTOP       = 2.9e9              # fim do sweep
-FSTEP       = 10e6               # step do sweep
+GAIN_TX0    = 38                 # ganho inicial de TX
+GAIN_RX0    = 50                 # ganho RX0
+GAIN_RX1    = 50                 # ganho RX1
+FSTART      = 5.1e9              # start do sweep
+FSTOP       = 5.7e9              # fim do sweep
+FSTEP       = 0.25e6               # step do sweep
 WINDOW      = 'bharris'         # ou 'hanning' janela FFT p/ S21 (Blackman-Harris ou Hanning)
-METHOD      = 'mean'            # ou 'median', agregação (median é mais robusto a outlier)
+METHOD      = 'median'            # ou 'median', agregação (median é mais robusto a outlier)
 DWELL       = 0.1               # tempo de settling após set_frequency (s)
 MIN_REF_BIN = 1e-9              # |Fref[k]| mínimo para aceitar bloco (evita div/0)
+
+NUM_SWEEPS  = 1
+TIMEOUT     = 5000              # em millissegundos
+
+# Batch_02 -> apenas o fio, sem o ressonador
+# Batch_03 -> com o ressonador
+
 S2P_FILE    = './sweep/s21.s2p'
+FOLDERNAME  = "./sweep/Save_s21/Batch_04/"
+
+#COPY_FILE   = f'./sweep/Save_s21/Batch_01/s21_test.s2p'
+
 running     = threading.Event()
 
 txlut = []             #  ← declare aqui!
@@ -81,6 +94,9 @@ freq_plot  = mag_plot = phase_plot = []
 
 lut_freq = lut_gain = None  # → sem LUT
 flag_finish = False
+
+# TODO: função para checar a variação do "ref", este não pode ter bruscas variações.
+
 # ──────────────────────────────────────────────────────────────
 #  ▒▒  Funções auxiliares
 # ──────────────────────────────────────────────────────────────
@@ -101,44 +117,13 @@ def s21_bins(ref_iq, meas_iq, k):
     """↦ bin k da FFT de cada canal"""
     return np.fft.fft(ref_iq)[k], np.fft.fft(meas_iq)[k]
 
-def measure_rssi_quick(sdr, rx_ref, buf, n_call, n_avg=4):
-    """medição rápida do RSSI_ref (para o servo)"""
-    vals=[]
-    for _ in range(n_avg):
-        sdr.sync_rx(buf, n_call)
-        d=np.frombuffer(buf,np.int16)
-        vals.append(rssi_block_dbfs(d[0::4], d[1::4]))
-    return float(np.mean(vals))
-
-def auto_adjust_tx_gain(sdr, tx_ch, rx_ref, buf, n_call, gain_cur):
-    """Servo PID simplificado: ±tx_step até |err|<=tol_db."""
-    if not AUTO_TX:  # servo desligado → só mede
-        return gain_cur, measure_rssi_quick(sdr, rx_ref, buf, n_call, 4)
-
-    g = gain_cur
-    for _ in range(MAX_ITER):
-        rssi = measure_rssi_quick(sdr, rx_ref, buf, n_call, 4)
-        err  = TARGET_DBFS - rssi
-        if abs(err) <= TOL_DB:
-            return g, rssi
-        step = TX_STEP if err > 0 else -TX_STEP
-        g_new = int(round(g + step))
-        g_new = max(TX_GAIN_MIN, min(TX_GAIN_MAX, g_new))
-        if g_new == g:   # já saturou nos limites
-            return g, rssi
-        sdr.set_gain(tx_ch, g_new)
-        g = g_new
-        time.sleep(0.01)
-        for _ in range(2): sdr.sync_rx(buf, n_call)
-    # retorna o último valor (não convergiu 100%)
-    return g, measure_rssi_quick(sdr, rx_ref, buf, n_call, 4)
 
 # ──────────────────────────────────────────────────────────────
 #  ▒▒  Cabeçalho S2P
 # ──────────────────────────────────────────────────────────────
 with open(S2P_FILE, 'w') as f:
-    f.write(f"! S21 sweep bladeRF  {datetime.now().isoformat(timespec='seconds')}\n")
-    f.write(f"# Frequency [MHz], |S21| [db], Phase [deg]\n")
+    f.write(f"! S21 sweep bladeRF - TX0={GAIN_TX0} db | RX0={GAIN_RX0} db | RX1={GAIN_RX1} db - {datetime.now().isoformat(timespec='seconds')}\n")
+    f.write(f"# Frequency [MHz], |S21| [db], |Mag_meas| [db], Phase [deg]\n")
 
 
 def plot_s2p(filename):
@@ -146,6 +131,7 @@ def plot_s2p(filename):
     # Listas para armazenar os dados
     frequencies = []
     magnitudes_db = []
+    magnitude_meas_db = []
     phases_deg = []
 
     print(f"Lendo o arquivo: {filename}")
@@ -171,10 +157,11 @@ def plot_s2p(filename):
                 # Processa a linha de dados
                 try:
                     parts = line.split()
-                    if len(parts) >= 3:
+                    if len(parts) >= 4:
                         frequencies.append(float(parts[0]))
                         magnitudes_db.append(float(parts[1]))
-                        phases_deg.append(float(parts[2]))
+                        magnitude_meas_db.append(float(parts[2]))
+                        phases_deg.append(float(parts[3]))
                 except ValueError as e:
                     print(f"Aviso: Ignorando linha mal formatada: '{line}' ({e})")
 
@@ -185,9 +172,9 @@ def plot_s2p(filename):
         print(f"Erro ao ler o arquivo: {e}")
         sys.exit(1)
 
-    if not frequencies:
-        print("Erro: Nenhum dado válido encontrado no arquivo.")
-        sys.exit(1)
+    # if not frequencies:
+    #     print("Erro: Nenhum dado válido encontrado no arquivo.")
+    #     sys.exit(1)
 
 
     freq_ghz = np.array(frequencies) / 1e9
@@ -204,15 +191,14 @@ def plot_s2p(filename):
     fig.suptitle(f'S21 - {filename}', fontsize=16)
 
     # --- Plot 1: Magnitude ---
-    ax1.plot(freq_ghz, mag_db, 'b.-', label='S21 Magnitude')
-    ax1.set_ylabel('Magnitude (dB)')
+    ax1.plot(freq_ghz, mag_db, 'b.-', label='S21 Relativo')
+    ax1.set_ylabel('Magnitude "Relativa" (dB)')
     ax1.grid(True, which='both', linestyle='--')
     ax1.legend()
     
-    20*np.log10(1/(10**(mag_db/20)))
     # --- Plot 2: Fase ---
-    ax2.plot(freq_ghz, phase_deg, 'r.-', label='S21 Fase')
-    ax2.set_ylabel('Fase (Graus)')
+    ax2.plot(freq_ghz, magnitude_meas_db, 'r.-', label='S21 Meas')
+    ax2.set_ylabel('Magnitude "Meas" (dB)')
     ax2.set_xlabel('Frequência (GHz)')
     ax2.grid(True, which='both', linestyle='--')
     ax2.legend()
@@ -242,7 +228,7 @@ def tx_loop(sdr, tx_ch):
     sdr.enable_module(tx_ch,True)
     try:
         while running.is_set() and not flag_finish:
-            sdr.sync_tx(payload, NSAMP, 3500)
+            sdr.sync_tx(payload, NSAMP)
     finally:
         sdr.enable_module(tx_ch,False)
         print("Finish tx_loop")
@@ -253,96 +239,113 @@ def tx_loop(sdr, tx_ch):
 def rx_loop(sdr, tx_ch, rx_ref, rx_meas):
     global txlut, flag_finish
 
-    # ⚑ 1. Configura ambos RX em modo Manual
-    for ch,g in ((rx_ref,GAIN_RX0),(rx_meas,GAIN_RX1)):
-        sdr.set_sample_rate(ch,int(Fs))
-        sdr.set_bandwidth(ch,int(Fs/2))
-        sdr.set_gain(ch,g)
-        sdr.set_gain_mode(ch,_bladerf.GainMode.Manual)
+    for k in range(NUM_SWEEPS):
+        # ⚑ 1. Configura ambos RX em modo Manual
+        for ch,g in ((rx_ref,GAIN_RX0),(rx_meas,GAIN_RX1)):
+            sdr.set_sample_rate(ch,int(Fs))
+            sdr.set_bandwidth(ch,int(Fs/2))
+            sdr.set_gain(ch,g)
+            sdr.set_gain_mode(ch,_bladerf.GainMode.Manual)
 
-    sdr.sync_config(_bladerf.ChannelLayout.RX_X2,
-                    _bladerf.Format.SC16_Q11,16,NSAMP,8,3500)
-    sdr.enable_module(rx_ref,True); sdr.enable_module(rx_meas,True)
-
-    # ⚑ 2. Pré-aloca buffers
-    freqs = np.arange(FSTART, FSTOP+FSTEP, FSTEP)
-    buf_rx = bytearray(NSAMP*2*4)      # I/Q de dois canais
-    N_CALL = NSAMP*2                   # nº “samples” a pedir no sync_rx
-    k_bin  = int(round(F_TONE*NSAMP/Fs))
-
-    # ganho atual de TX (parte do servo ou LUT)
-    g_tx = GAIN_TX0
-    if lut_gain is not None:
-        g_tx = int(lut_gain[0])
-        sdr.set_gain(tx_ch, g_tx)
-
-    # Arquivos auxiliares
-    with open(S2P_FILE,'a') as f_s2p,\
-         tqdm(freqs,ncols=100,
-              desc=('S21 sweep (TXLUT)' if lut_gain is not None else
-                    ('S21 sweep (AUTO-TX)' if AUTO_TX else 'S21 sweep'))) as bar:
+        if k == 0:
+            sdr.sync_config(_bladerf.ChannelLayout.RX_X2,
+                            _bladerf.Format.SC16_Q11,16,NSAMP,8,3500)
+            
+            sdr.enable_module(rx_ref,True); sdr.enable_module(rx_meas,True)
 
 
-        # ⚑ 3. Loop principal sobre as frequências
-        for f_rf in bar:
-            # 3a. sintoniza LO único (TX + RX0 + RX1)
-            for ch in (tx_ch, rx_ref, rx_meas):
-                sdr.set_frequency(ch, int(f_rf))
-            time.sleep(DWELL)
+        # ⚑ 2. Pré-aloca buffers
+        freqs = np.arange(FSTART, FSTOP+FSTEP, FSTEP)
+        buf_rx = bytearray(NSAMP*2*4)      # I/Q de dois canais
+        N_CALL = NSAMP*2                   # nº “samples” a pedir no sync_rx
+        k_bin  = int(round(F_TONE*NSAMP/Fs))
 
-            # 3b. descarta blocos iniciais (N_THROW) para purgar transiente
-            for _ in range(N_THROW):
-                sdr.sync_rx(buf_rx, N_CALL)
+        # ganho atual de TX (parte do servo ou LUT)
+        g_tx = GAIN_TX0
+        if lut_gain is not None:
+            g_tx = int(lut_gain[0])
+            sdr.set_gain(tx_ch, g_tx)
 
-            # 3c. SE LUT existe → aplica; SENÃO → chama servo (opcional)
-            if lut_gain is not None:
-                idx = np.searchsorted(lut_freq, f_rf, side='right') - 1
-                idx = np.clip(idx, 0, len(lut_gain)-1)
-                g_tx = int(lut_gain[idx])
-                sdr.set_gain(tx_ch, g_tx)
-                quick_rssi = measure_rssi_quick(sdr, rx_ref, buf_rx, N_CALL, 2)
-            else:
-                g_tx, quick_rssi = auto_adjust_tx_gain(
-                        sdr, tx_ch, rx_ref, buf_rx, N_CALL, g_tx)
-                if AUTO_TX:          # grava LUT “on the fly”
-                    txlut.append((f_rf, g_tx))
+        # Arquivos auxiliares
+        with open(S2P_FILE,'a') as f_s2p,\
+            tqdm(freqs,ncols=100,
+                desc=('S21 sweep (TXLUT)' if lut_gain is not None else
+                        (f'S21 sweep {k+1}/{NUM_SWEEPS}'))) as bar:
 
-            # 3d. descarta mais dois blocos após mudar TxGain
-            for _ in range(2): sdr.sync_rx(buf_rx, N_CALL, 3500)
 
-            # ⚑ 4. Coleta NBLK blocos “válidos”
-            ratios   = []
-            for _ in range(NBLK):
-                sdr.sync_rx(buf_rx, N_CALL, 3500)
-                d = np.frombuffer(buf_rx, np.int16)
+            # ⚑ 3. Loop principal sobre as frequências
+            for f_rf in bar:
+                # 3a. sintoniza LO único (TX + RX0 + RX1)
+                for ch in (tx_ch, rx_ref, rx_meas):
+                    sdr.set_frequency(ch, int(f_rf))
+                time.sleep(DWELL)
 
-                ir, qr = d[0::4], d[1::4]         # RX0
-                im, qm = d[2::4], d[3::4]         # RX1
+                # 3b. descarta blocos iniciais (N_THROW) para purgar transiente
+                for _ in range(N_THROW):
+                    sdr.sync_rx(buf_rx, N_CALL)
 
-                ref_iq  = (ir+1j*qr) * W
-                meas_iq = (im+1j*qm) * W
-                Fref_k, Fmeas_k = s21_bins(ref_iq, meas_iq, k_bin)
-                if abs(Fref_k) > MIN_REF_BIN:
-                    ratios.append(Fmeas_k / Fref_k)
+                # 3d. descarta mais dois blocos após mudar TxGain
+                for _ in range(2): sdr.sync_rx(buf_rx, N_CALL)
 
-            # 4b. Agrega S21
-            if ratios:
-                ratio_val = (np.median if METHOD=='median' else np.mean)(ratios)
-            else:
-                ratio_val = np.nan+1j*np.nan
-            mag_db = 20*np.log10(abs(ratio_val)+1e-12)
-            phase_deg = np.angle(ratio_val, deg=True)
+                # ⚑ 4. Coleta NBLK blocos “válidos”
+                ratios   = []
+                meas = []
+                ref = []
+                for _ in range(NBLK):
+                    sdr.sync_rx(buf_rx, N_CALL)
+                    d = np.frombuffer(buf_rx, np.int16)
 
-            # 4c. Console + arquivos
-            bar.write(f"{f_rf/1e6:7.2f} MHz |S21|={mag_db:6.2f} dB  "
-                      f"TX={g_tx} dB")
-            f_s2p.write(f"{f_rf:.6e} {mag_db:.6f} {phase_deg:.6f}\n")
+                    ir, qr = d[0::4], d[1::4]         # RX0
+                    im, qm = d[2::4], d[3::4]         # RX1
 
-        flag_finish = True
+                    meas_iq  = (ir+1j*qr) #* W
+                    ref_iq = (im+1j*qm) #* W
+                    Fref_k, Fmeas_k = s21_bins(ref_iq, meas_iq, k_bin)
+                    if abs(Fref_k) > MIN_REF_BIN:
+
+                        ref.append(Fref_k)
+                        meas.append(Fmeas_k)
+                        
+                        ratios.append(Fmeas_k / Fref_k)
+
+                # 4b. Agrega S21
+                if ratios:
+                    ratio_val = (np.median if METHOD=='median' else np.mean)(ratios)
+                    ref_val = (np.median if METHOD=='median' else np.mean)(ref)
+                    meas_val = (np.median if METHOD=='median' else np.mean)(meas)
+                else:
+                    ratio_val = np.nan+1j*np.nan
+                mag_db = 20*np.log10(abs(ratio_val)+1e-12)
+                phase_deg = np.angle(ratio_val, deg=True)
+
+                mag_db_ref = 20*np.log10(abs(ref_val)+1e-12)
+                mag_db_meas = 20*np.log10(abs(meas_val)+1e-12)
+
+                rms = np.sqrt(np.average(np.abs(ref_iq)*np.abs(ref_iq)))
+
+                # 4c. Console + arquivos
+                bar.write(f"{f_rf/1e6:7.2f} MHz |S21|={mag_db:6.2f} dB  "
+                        f"RX_ref: {mag_db_ref:6.2f} | RX_meas: {mag_db_meas:6.2f} | TX={g_tx} dB | RMS={rms:.2f}")
+                f_s2p.write(f"{f_rf:.6e} {mag_db:.6f} {mag_db_meas:.6f} {phase_deg:.6f}\n")
+
+
+        # Copy the .s2p file to Save_s21
+        copy_filename = f"{FOLDERNAME}/s21_{k}.s2p"
+        shutil.copyfile(S2P_FILE, copy_filename)
+        
+        # Clear main .s2p file
+        if k < (NUM_SWEEPS-1): 
+            with open(S2P_FILE, 'w') as f: 
+                f.write("")
+
+        time.sleep(DWELL*100)
+
+    flag_finish = True
 
     print("Finish RX loop")
     sdr.enable_module(_bladerf.CHANNEL_RX(0), False)
     sdr.enable_module(_bladerf.CHANNEL_RX(1), False)
+
 
 
 # ──────────────────────────────────────────────────────────────
@@ -366,6 +369,6 @@ thr_tx.join()
 
 running.clear()
 
-plot_s2p(S2P_FILE)
+plot_s2p(S2P_FILE) # plot the last .s2p file
 
 sdr.close()
