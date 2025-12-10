@@ -72,29 +72,35 @@ def read_s2p(filename):
     return freq_ghz, mag_db, mag_meas_db, phase_deg
 
 
-def eval_data(foldername, num_files, window_moving_mean):
-
+def eval_data(foldername, num_files, window_moving_mean, onefile_only=False):
     freq = []
     mag_db = []
     mag_meas_db = []
     phase_deg = []
 
+    if onefile_only:
+        freq, mag_db, mag_meas_db, phase_deg = read_s2p(foldername)
+        num_files=1
 
+        mean_mag_db = mag_db
+        mean_mag_meas_db = mag_meas_db
 
-    for i in range(num_files):
+    else:
 
-        filename = f"{foldername}/s21_{i}.s2p"
+        for i in range(num_files):
 
-        freq, mag_db, mag_meas_db, phase_deg = read_s2p(filename)
+            filename = f"{foldername}/s21_{i}.s2p"
 
-        if i == 0:
-            mean_mag_db = np.zeros(len(mag_db))
-            mean_mag_meas_db = np.zeros(len(mag_meas_db))
+            freq, mag_db, mag_meas_db, phase_deg = read_s2p(filename)
 
-        #print(mag_meas_db)
+            if i == 0:
+                mean_mag_db = np.zeros(len(mag_db))
+                mean_mag_meas_db = np.zeros(len(mag_meas_db))
 
-        mean_mag_db += mag_db
-        mean_mag_meas_db += mag_meas_db
+            #print(mag_meas_db)
+
+            mean_mag_db += mag_db
+            mean_mag_meas_db += mag_meas_db
 
     mean_mag_db /= num_files
     mean_mag_meas_db /= num_files
@@ -104,7 +110,7 @@ def eval_data(foldername, num_files, window_moving_mean):
 
     return freq, mean_mag_db, mean_mag_meas_db
 
-def plot_data(freq_axis, mean_mag_db_axis, mean_mag_meas_db_axis):
+def plot_data(freq_axis, mean_mag_db_axis, mean_mag_meas_db_axis, top_ylim=-15, bottom_ylim=-70):
     # Cria uma figura com dois subplots (um em cima do outro, compartilhando o eixo X)
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
 
@@ -114,13 +120,15 @@ def plot_data(freq_axis, mean_mag_db_axis, mean_mag_meas_db_axis):
     ax1.plot(freq_axis, mean_mag_db_axis, 'b.-', label='S21 Relativo')
     ax1.set_ylabel('Magnitude "Relativa" (dB)')
     ax1.grid(True, which='both', linestyle='--')
-    ax1.set_xlim(5.1, 5.7)
+    ax1.set_xlim(5.08, 5.72)
+    ax1.set_ylim(bottom_ylim, top_ylim)
     ax1.legend()
 
     # --- Plot 2: Fase ---
     ax2.plot(freq_axis, mean_mag_meas_db_axis, 'r.-', label='S21 Meas')
     ax2.set_ylabel('Magnitude "Meas" (dB)')
     ax2.set_xlabel('Frequência (GHz)')
+    ax2.set_ylim(bottom_ylim, top_ylim)
     
     ax2.grid(True, which='both', linestyle='--')
     ax2.legend()
