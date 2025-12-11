@@ -1,3 +1,2 @@
 ./sweep/__pycache__/*
-./sweep/Save_s21/*
-./sweep/s21.s2p
+*.s2p
