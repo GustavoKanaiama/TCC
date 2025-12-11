@@ -110,13 +110,15 @@ def eval_data(foldername, num_files, window_moving_mean, onefile_only=False):
 
     return freq, mean_mag_db, mean_mag_meas_db
 
-def plot_data(freq_axis, mean_mag_db_axis, mean_mag_meas_db_axis, top_ylim=-15, bottom_ylim=-70):
+def plot_data(freq_axis, mean_mag_db_axis, mean_mag_meas_db_axis):
     # Cria uma figura com dois subplots (um em cima do outro, compartilhando o eixo X)
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8), sharex=True)
 
     fig.suptitle(f'S21 - Rel. Meas.', fontsize=16)
+    top_ylim=-15
+    bottom_ylim=-70
 
-    # --- Plot 1: Magnitude ---
+    # --- Plot 1: Magnitude Relativa ---
     ax1.plot(freq_axis, mean_mag_db_axis, 'b.-', label='S21 Relativo')
     ax1.set_ylabel('Magnitude "Relativa" (dB)')
     ax1.grid(True, which='both', linestyle='--')
@@ -124,7 +126,7 @@ def plot_data(freq_axis, mean_mag_db_axis, mean_mag_meas_db_axis, top_ylim=-15, 
     ax1.set_ylim(bottom_ylim, top_ylim)
     ax1.legend()
 
-    # --- Plot 2: Fase ---
+    # --- Plot 2: Magnitude Absoluta (meas) ---
     ax2.plot(freq_axis, mean_mag_meas_db_axis, 'r.-', label='S21 Meas')
     ax2.set_ylabel('Magnitude "Meas" (dB)')
     ax2.set_xlabel('Frequência (GHz)')
